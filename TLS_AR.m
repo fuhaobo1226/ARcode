@@ -136,50 +136,82 @@ fprintf('  => 参数结果: ');
 fprintf('%.4f  ', X0_upd(1:p));
 fprintf('\n');
 
-%% ================== 4. 多步动态预测 (得出差分预测值) ==================
+%% ================== 精度评定 ==================
+% 使用原始观测矩阵 B0 和常数项 L 计算 TLS 的残差和中误差
+v_TLS = B0 * X0_upd - L;
+sigma0_TLS = sqrt((v_TLS' * v_TLS) / n);
+
+fprintf('\n===== 最终 TLS 参数与精度评定 =====\n');
+for i = 1:p
+    fprintf('X_%d = %8.4f  ', i, X0_upd(i));
+end
+fprintf('\n中误差 σ0 = %.4f \n', sigma0_TLS);
+
+
+%% ================== 4. 滚动单步预测 (得出差分预测值) ==================
+% 导师要求：不再把预测值塞回历史，而是每次抓取最新的“真实数据”
 y_pred_LS_diff = zeros(pred_num, 1);
 y_pred_YW_diff = zeros(pred_num, 1);
 y_pred_TLS_diff = zeros(pred_num, 1);
 
-hist_LS = y(end-p+1:end);
-hist_YW = y(end-p+1:end);
-hist_TLS = y_upd(end-p+1:end); % TLS使用迭代去噪后的观测值尾巴
-
-for k = 1:pred_num
-    y_pred_LS_diff(k) = flipud(hist_LS)' * X_LS;
-    y_pred_YW_diff(k) = flipud(hist_YW)' * X_YW;
-    y_pred_TLS_diff(k) = flipud(hist_TLS)' * X0_upd;
-    
-    hist_LS = [hist_LS(2:end); y_pred_LS_diff(k)];
-    hist_YW = [hist_YW(2:end); y_pred_YW_diff(k)];
-    hist_TLS = [hist_TLS(2:end); y_pred_TLS_diff(k)];
+% 提前算出全部的真实差分序列（为了给滚动窗口提供真实历史数据）
+if diff_order == 0
+    y_all_diff = y_all_raw;
+elseif diff_order == 1
+    y_all_diff = diff(y_all_raw);
+elseif diff_order == 2
+    y_all_diff = diff(y_all_raw, 2);
 end
 
-%% ================== 5. 自动逆差分还原 (核心通用逻辑) ==================
-% 将三种方法的差分预测结果放入循环，统一还原为原始沉降量
+for k = 1:pred_num
+    % 提取当前预测步所需的真实差分历史窗口 (长度为 p)
+    hist_true = y_all_diff(N + k - p : N + k - 1);
+    
+    y_pred_LS_diff(k) = flipud(hist_true)' * X_LS;
+    y_pred_YW_diff(k) = flipud(hist_true)' * X_YW;
+    
+    % TLS 历史窗口特殊拼接：
+    hist_TLS = zeros(p, 1);
+    for i = 1:p
+        idx = N + k - p + i - 1;
+        if idx <= N
+            hist_TLS(i) = y_upd(idx); % 训练集内用滤波更新后的数据
+        else
+            hist_TLS(i) = y_all_diff(idx); % 测试集(未来的数据)用真实的差分数据
+        end
+    end
+    y_pred_TLS_diff(k) = flipud(hist_TLS)' * X0_upd;
+end
+
+%% ================== 5. 滚动单步逆差分还原 (每次依靠真实前一期原值) ==================
+% 将三种方法的差分预测结果放入循环，直接用真实的原始沉降量进行单步公式还原
 preds_diff = {y_pred_LS_diff, y_pred_YW_diff, y_pred_TLS_diff};
 preds_restore = cell(1, 3);
 
 for m = 1:3
     curr_diff = preds_diff{m};
+    curr_restore = zeros(pred_num, 1);
     
-    if diff_order == 0
-        % 0阶：不还原，直接输出
-        preds_restore{m} = curr_diff;
+    for k = 1:pred_num
+        curr_idx = train_num_raw + k; % 当前正在预测的期数 (比如第 61 期)
         
-    elseif diff_order == 1
-        % 1阶：原值 = 最后一期原值 + 一阶差分的累积和
-        last_raw = y_train_raw(end);
-        preds_restore{m} = last_raw + cumsum(curr_diff);
-        
-    elseif diff_order == 2
-        % 2阶：先还原出一阶差分序列，再还原出原始序列
-        last_raw = y_train_raw(end);
-        last_diff1 = y_train_raw(end) - y_train_raw(end-1); % 手工算出最后一期的一阶差分
-        
-        pred_diff1 = last_diff1 + cumsum(curr_diff);        % 还原出未来的的一阶差分
-        preds_restore{m} = last_raw + cumsum(pred_diff1);   % 还原出未来的原始值
+        if diff_order == 0
+            curr_restore(k) = curr_diff(k);
+            
+        elseif diff_order == 1
+            % 1阶：预测值 = 真实的上一期原值 + 预测的一阶差分
+            true_last = y_all_raw(curr_idx - 1);
+            curr_restore(k) = true_last + curr_diff(k);
+            
+        elseif diff_order == 2
+            % 2阶：预测值 = 预测二阶差分 + 2*真实上一期 - 真实上上期
+            % 【这就是你手算的公式！完全抛弃了难懂的 cumsum，直截了当！】
+            true_last1 = y_all_raw(curr_idx - 1);
+            true_last2 = y_all_raw(curr_idx - 2);
+            curr_restore(k) = curr_diff(k) + 2*true_last1 - true_last2;
+        end
     end
+    preds_restore{m} = curr_restore;
 end
 
 % 提取最终的原始量级预测值
@@ -246,5 +278,5 @@ grid on;
 xlim([pred_x(1)-1, pred_x(end)+1]);
 xlabel(sprintf('预测期数 (%d-%d期)', pred_x(1), pred_x(end)), 'FontSize', 12);
 ylabel('预测绝对误差 (mm)', 'FontSize', 12);
-title('不同解法多步预测残差对比', 'FontSize', 14);
+title('单步滚动预测残差对比', 'FontSize', 14);
 legend('LS误差', 'YW误差', 'TLS误差', 'Location', 'best');
