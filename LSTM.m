@@ -51,31 +51,40 @@ options = trainingOptions('adam', ...
 % 训练 LSTM 网络
 net = trainNetwork(XTrain, YTrain, layers, options);
 
-%% 4. 衔接 PDF 流程：预测将来时间步 (闭环预测)
+%% 4. 衔接 PDF 流程：预测将来时间步 (单步滚动预测)
 % 使用与训练数据相同的参数标准化测试数据
 dataTestStandardized = (dataTest - mu) / sig; 
 XTest = dataTestStandardized(1:end-1);        
-YTest = dataTest(2:end); % 提取真实的测试集用于最后计算误差
 
-% 初始化网络状态：先对训练数据进行预测，再用 YTrain(end) 开始第一步预测
-net = predictAndUpdateState(net, XTrain);
-[net, YPred] = predictAndUpdateState(net, YTrain(end));
+% 提取真实的测试集用于最后计算误差 (严格保持原变量名 YTest)
+YTest = dataTest(2:end); 
 
-% 循环其余预测，将前一次预测作为输入 (闭环)
+% 获取测试步数 (严格保持原变量名 numTimeStepsTest)
 numTimeStepsTest = numel(XTest);
-for i = 2:numTimeStepsTest
-    [net, YPred(:,i)] = predictAndUpdateState(net, YPred(:,i-1), 'ExecutionEnvironment', 'cpu'); 
+
+% 初始化网络状态：先对训练数据进行预测预热
+net = predictAndUpdateState(net, XTrain);
+
+% 初始化预测结果数组
+YPred_Standardized = zeros(1, numTimeStepsTest);
+
+% 循环预测：单步滚动，每次输入真实的 XTest(i)
+for i = 1:numTimeStepsTest
+    [net, YPred_Standardized(i)] = predictAndUpdateState(net, XTest(i), 'ExecutionEnvironment', 'cpu'); 
 end
 
-% 使用先前计算的参数对预测进行去标准化
-YPred = sig * YPred + mu;
+% 使用先前计算的参数对预测进行去标准化 (严格保持原变量名 YPred)
+YPred = sig * YPred_Standardized + mu;
 
-%% 5. 结果评估 (PDF 后续逻辑)
-YTest_real = dataTest(2:end); 
+%% 5. 结果评估
+% 计算均方根误差 (RMSE) 和 MAE
+err_LSTM = YPred - YTest;
+rmse = sqrt(mean(err_LSTM.^2)); 
+mae = mean(abs(err_LSTM));
 
-% 计算均方根误差 (RMSE)
-rmse = sqrt(mean((YPred - YTest_real).^2)); 
-fprintf('提取数据的预测完成，RMSE: %.4f\n', rmse);
+fprintf('\n===== LSTM 滚动单步预测结果 (61-65期) =====\n');
+fprintf('RMSE: %.4f\n', rmse);
+fprintf('MAE: %.4f\n', mae);
 
 %% 可视化 1-A：全局趋势图 
 figure(1) % 明确指定新建编号为 1 的图窗
